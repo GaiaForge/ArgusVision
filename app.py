@@ -586,17 +586,19 @@ button.lg { border-radius: 10px !important; font-weight: 600 !important; }
 #delete-btn:hover { background: #c93520 !important; }
 
 /* Make the capture gallery expand to fill remaining vertical space at the
-   bottom of the tab, rather than a fixed small height. Flexbox-based - may
-   need live adjustment depending on Gradio's exact DOM structure. */
+   bottom of the tab, but cap individual thumbnail height by targeting the
+   <img> tags directly rather than Gradio's internal wrapper class name
+   (which changed between Gradio 5.x and 6.x and silently broke this rule -
+   without a cap, a handful of images stretch to fill the whole container). */
 .gradio-container { display: flex; flex-direction: column; min-height: 100vh; }
 gradio-app, .tabs, .tabitem { display: flex; flex-direction: column; flex: 1; }
 #capture-gallery {
     flex: 1 1 auto;
     min-height: 220px;
 }
-#capture-gallery .grid-wrap {
-    height: 100% !important;
-    justify-content: flex-start !important;
+#capture-gallery img {
+    max-height: 180px !important;
+    object-fit: contain !important;
 }
 """
 
