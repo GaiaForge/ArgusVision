@@ -30,7 +30,16 @@ def overlay_heatmap(frame_rgb, anomaly_map, alpha=0.45):
     return cv2.addWeighted(frame_rgb, 1 - alpha, heatmap_rgb, alpha, 0)
 
 DATA_ROOT = "inspection_data/images"
-PRESET_LABELS = ["normal", "missing_component", "wrong_placement", "wrong_color"]
+
+# Hierarchical label taxonomy: category -> list of subtypes.
+# "normal" is a leaf category (images go straight in inspection_data/images/normal/).
+# "defect" is a parent whose subtypes are the actual capture folders
+# (inspection_data/images/defect/missing_component/, etc.) - a category with
+# subtypes never gets images saved directly under it.
+TAXONOMY = {
+    "normal": [],
+    "defect": ["missing_component", "wrong_placement", "wrong_color"],
+}
 
 # Tesla UI Design Standards palette (confluence.teslamotors.com/spaces/CONHUB/pages/4179687050)
 COLOR_PRIMARY_BLUE = "#3e6be2"
@@ -115,6 +124,16 @@ class CameraController:
         except Exception:
             pass
 
+    def get_current_exposure(self):
+        if not self.device:
+            return None
+        return float(self.device.nodemap.get_node("ExposureTime").value)
+
+    def get_current_gain(self):
+        if not self.device:
+            return None
+        return float(self.device.nodemap.get_node("Gain").value)
+
     def stop(self):
         self.running = False
         if self.device:
@@ -149,6 +168,62 @@ def toggle_inference(enabled):
 
 def update_threshold(value):
     inference_state["threshold"] = value
+
+
+def all_images_in_folder(folder):
+    if not os.path.isdir(folder):
+        return []
+    return [os.path.join(folder, f) for f in os.listdir(folder)]
+
+
+def score_images(engine, paths):
+    scores = []
+    for path in paths:
+        frame = cv2.cvtColor(cv2.imread(path), cv2.COLOR_BGR2RGB)
+        _, score = engine.run(frame)
+        scores.append(score)
+    return scores
+
+
+def suggest_threshold():
+    engine = inference_state["engine"]
+    if engine is None:
+        return gr.update(), "Enable Live Inference first so the LiZAD connection is available."
+
+    tree = discover_taxonomy()
+    normal_paths = all_images_in_folder(label_dir("normal", None))
+    defect_paths = []
+    for subtype in tree.get("defect", []):
+        defect_paths.extend(all_images_in_folder(label_dir("defect", subtype)))
+
+    if not normal_paths or not defect_paths:
+        return gr.update(), (
+            f"Need at least one captured image in both 'normal' and a 'defect' subtype "
+            f"to suggest a threshold (have {len(normal_paths)} normal, {len(defect_paths)} defect)."
+        )
+
+    normal_scores = score_images(engine, normal_paths)
+    defect_scores = score_images(engine, defect_paths)
+    max_normal = max(normal_scores)
+    min_defect = min(defect_scores)
+    suggested = round((max_normal + min_defect) / 2, 3)
+
+    if max_normal >= min_defect:
+        note = (
+            f"Scores overlap (normal max={max_normal:.3f}, defect min={min_defect:.3f}) - "
+            "this is a rough midpoint, expect some misses. Capture more examples or revisit the prompts."
+        )
+    else:
+        note = f"Clean separation - normal max={max_normal:.3f}, defect min={min_defect:.3f}."
+
+    return (
+        gr.update(value=suggested),
+        f"Suggested threshold: {suggested}. {note} ({len(normal_scores)} normal, {len(defect_scores)} defect images evaluated)",
+    )
+
+
+def lock_threshold(locked):
+    return gr.update(interactive=not locked), gr.update(interactive=not locked)
 
 
 def _inference_loop():
@@ -199,6 +274,12 @@ def compute_sharpness(frame):
     return round(float(cv2.Laplacian(gray, cv2.CV_64F).var()), 1)
 
 
+def compute_brightness(frame):
+    if frame is None:
+        return 0.0
+    return round(float(np.mean(frame)), 1)
+
+
 def no_camera_placeholder():
     img = np.full((480, 640, 3), 240, dtype=np.uint8)
     cv2.putText(img, "No Camera Connected", (70, 220), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (112, 112, 112), 2, cv2.LINE_AA)
@@ -210,9 +291,12 @@ def stream_frames():
     while True:
         frame = camera.get_frame()
         if frame is not None:
-            yield frame, compute_sharpness(frame), status_html()
+            sharpness = compute_sharpness(frame)
+            brightness = compute_brightness(frame)
+            yield frame, frame, sharpness, sharpness, brightness, status_html()
         else:
-            yield no_camera_placeholder(), 0.0, status_html()
+            placeholder = no_camera_placeholder()
+            yield placeholder, placeholder, 0.0, 0.0, 0.0, status_html()
         time.sleep(0.2)
 
 
@@ -238,65 +322,188 @@ def toggle_wb_auto(auto):
     camera.set_wb_auto(auto)
 
 
-def label_from_choice(choice):
-    return choice.split(" (")[0] if choice else "normal"
-
-
-def label_counts():
-    labels = set(PRESET_LABELS)
-    if os.path.isdir(DATA_ROOT):
-        labels.update(
-            d for d in os.listdir(DATA_ROOT) if os.path.isdir(os.path.join(DATA_ROOT, d))
+def lock_camera_settings(locked, exposure_auto_value, gain_auto_value):
+    if locked:
+        exposure_val = camera.get_current_exposure()
+        gain_val = camera.get_current_gain()
+        if exposure_val is None or gain_val is None:
+            return (
+                gr.update(value=False),
+                gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+                "Cannot lock - no camera connected",
+            )
+        camera.set_exposure_value(exposure_val)
+        camera.set_gain_value(gain_val)
+        return (
+            gr.update(),
+            gr.update(interactive=False),
+            gr.update(value=exposure_val, interactive=False),
+            gr.update(interactive=False),
+            gr.update(value=gain_val, interactive=False),
+            gr.update(interactive=False),
+            f"Locked - exposure {exposure_val:.0f}µs, gain {gain_val:.1f}dB frozen",
         )
+    return (
+        gr.update(),
+        gr.update(interactive=True),
+        gr.update(interactive=not exposure_auto_value),
+        gr.update(interactive=True),
+        gr.update(interactive=not gain_auto_value),
+        gr.update(interactive=True),
+        "Unlocked - settings can be adjusted",
+    )
+
+
+def label_from_choice(choice):
+    return choice.split(" (")[0] if choice else None
+
+
+def label_dir(category, subtype):
+    return os.path.join(DATA_ROOT, category, subtype) if subtype else os.path.join(DATA_ROOT, category)
+
+
+def count_images(category, subtype):
+    folder = label_dir(category, subtype)
+    return len(os.listdir(folder)) if os.path.isdir(folder) else 0
+
+
+def discover_taxonomy():
+    """Merge the built-in TAXONOMY with whatever category/subtype folders
+    already exist on disk, so subtypes added via the custom-subtype box in
+    past sessions still show up."""
+    tree = {category: list(subs) for category, subs in TAXONOMY.items()}
+    if not os.path.isdir(DATA_ROOT):
+        return tree
+    for category in os.listdir(DATA_ROOT):
+        if not os.path.isdir(os.path.join(DATA_ROOT, category)):
+            continue
+        tree.setdefault(category, [])
+        cat_path = os.path.join(DATA_ROOT, category)
+        for sub in os.listdir(cat_path):
+            if os.path.isdir(os.path.join(cat_path, sub)) and sub not in tree[category]:
+                tree[category].append(sub)
+    return tree
+
+
+def category_choices(tree):
     choices = []
-    for label in sorted(labels):
-        folder = os.path.join(DATA_ROOT, label)
-        count = len(os.listdir(folder)) if os.path.isdir(folder) else 0
-        choices.append(f"{label} ({count})")
+    for category in sorted(tree):
+        subs = tree[category]
+        total = sum(count_images(category, s) for s in subs) if subs else count_images(category, None)
+        choices.append(f"{category} ({total})")
     return choices
 
 
-def choice_for_label(label, choices):
-    return next((c for c in choices if c.startswith(label + " (")), choices[0])
+def subtype_choices(tree, category):
+    return [f"{s} ({count_images(category, s)})" for s in sorted(tree.get(category, []))]
 
 
-def images_for_label(label):
-    folder = os.path.join(DATA_ROOT, label)
+def choice_for_value(value, choices):
+    if not value:
+        return None
+    return next((c for c in choices if c.startswith(value + " (")), (choices[0] if choices else None))
+
+
+def current_selection(category_choice, subtype_choice):
+    category = label_from_choice(category_choice)
+    subtype = label_from_choice(subtype_choice) if subtype_choice else None
+    return category, subtype
+
+
+def images_for(category, subtype):
+    folder = label_dir(category, subtype)
     if not os.path.isdir(folder):
         return []
     return sorted(os.path.join(folder, f) for f in os.listdir(folder))[-8:]
 
 
-def refresh_gallery(label_choice):
-    return images_for_label(label_from_choice(label_choice))
+def on_category_change(category_choice):
+    tree = discover_taxonomy()
+    category = label_from_choice(category_choice)
+    subs = subtype_choices(tree, category)
+    sub_value = subs[0] if subs else None
+    subtype = label_from_choice(sub_value) if sub_value else None
+    return gr.update(choices=subs, value=sub_value), images_for(category, subtype), None, ""
 
 
-def capture_and_save(label_choice, custom_label):
+def on_subtype_change(category_choice, subtype_choice):
+    category, subtype = current_selection(category_choice, subtype_choice)
+    return images_for(category, subtype), None, ""
+
+
+def on_gallery_select(evt: gr.SelectData, category_choice, subtype_choice):
+    category, subtype = current_selection(category_choice, subtype_choice)
+    images = images_for(category, subtype)
+    if evt.index < len(images):
+        path = images[evt.index]
+        return path, os.path.basename(path)
+    return None, ""
+
+
+def delete_selected_image(selected_path, category_choice, subtype_choice):
+    category, subtype = current_selection(category_choice, subtype_choice)
+    if selected_path and os.path.exists(selected_path):
+        os.remove(selected_path)
+        msg = f"Deleted {selected_path}"
+    else:
+        msg = "Nothing selected to delete"
+
+    tree = discover_taxonomy()
+    new_categories = category_choices(tree)
+    new_category_value = choice_for_value(category, new_categories)
+    new_subtypes = subtype_choices(tree, category)
+    new_subtype_value = choice_for_value(subtype, new_subtypes)
+
+    return (
+        msg,
+        gr.update(choices=new_categories, value=new_category_value),
+        gr.update(choices=new_subtypes, value=new_subtype_value),
+        images_for(category, subtype),
+        None,
+        "",
+    )
+
+
+def capture_and_save(category_choice, subtype_choice, custom_subtype):
     frame = camera.get_frame()
     if frame is None:
-        empty_choices = label_counts()
-        return "No frame available yet - is the camera connected?", gr.update(choices=empty_choices), [], ""
+        tree = discover_taxonomy()
+        category = label_from_choice(category_choice)
+        return (
+            "No frame available yet - is the camera connected?",
+            gr.update(choices=category_choices(tree)),
+            gr.update(choices=subtype_choices(tree, category)),
+            [],
+            "",
+        )
 
-    label = custom_label.strip() if custom_label.strip() else label_from_choice(label_choice)
-    folder = os.path.join(DATA_ROOT, label)
+    category, subtype = current_selection(category_choice, subtype_choice)
+    if custom_subtype.strip():
+        subtype = custom_subtype.strip()
+
+    folder = label_dir(category, subtype)
     os.makedirs(folder, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     filepath = os.path.join(folder, f"{timestamp}.jpg")
     cv2.imwrite(filepath, cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
     last_saved_path["path"] = filepath
 
-    new_choices = label_counts()
-    new_value = choice_for_label(label, new_choices)
+    tree = discover_taxonomy()
+    new_categories = category_choices(tree)
+    new_category_value = choice_for_value(category, new_categories)
+    new_subtypes = subtype_choices(tree, category)
+    new_subtype_value = choice_for_value(subtype, new_subtypes)
 
     return (
         f"Saved to {filepath}",
-        gr.update(choices=new_choices, value=new_value),
-        images_for_label(label),
+        gr.update(choices=new_categories, value=new_category_value),
+        gr.update(choices=new_subtypes, value=new_subtype_value),
+        images_for(category, subtype),
         "",
     )
 
 
-def undo_last_capture(label_choice):
+def undo_last_capture(category_choice, subtype_choice):
     path = last_saved_path["path"]
     if path and os.path.exists(path):
         os.remove(path)
@@ -305,10 +512,19 @@ def undo_last_capture(label_choice):
     else:
         msg = "Nothing to undo"
 
-    current_label = label_from_choice(label_choice)
-    new_choices = label_counts()
-    new_value = choice_for_label(current_label, new_choices)
-    return msg, gr.update(choices=new_choices, value=new_value), images_for_label(current_label)
+    category, subtype = current_selection(category_choice, subtype_choice)
+    tree = discover_taxonomy()
+    new_categories = category_choices(tree)
+    new_category_value = choice_for_value(category, new_categories)
+    new_subtypes = subtype_choices(tree, category)
+    new_subtype_value = choice_for_value(subtype, new_subtypes)
+
+    return (
+        msg,
+        gr.update(choices=new_categories, value=new_category_value),
+        gr.update(choices=new_subtypes, value=new_subtype_value),
+        images_for(category, subtype),
+    )
 
 
 # Light, high-contrast theme built from the Tesla UI Design Standards palette,
@@ -366,6 +582,9 @@ CSS = """
 
 button.lg { border-radius: 10px !important; font-weight: 600 !important; }
 
+#delete-btn { background: #eb432f !important; color: white !important; border: none !important; }
+#delete-btn:hover { background: #c93520 !important; }
+
 /* Make the capture gallery expand to fill remaining vertical space at the
    bottom of the tab, rather than a fixed small height. Flexbox-based - may
    need live adjustment depending on Gradio's exact DOM structure. */
@@ -396,15 +615,28 @@ with gr.Blocks(title="ArgusVision", theme=THEME, css=CSS) as demo:
                     sharpness_display = gr.Number(label="Focus Sharpness (higher = sharper)", interactive=False)
 
                 with gr.Column(scale=1):
-                    initial_choices = label_counts()
-                    label_radio = gr.Radio(choices=initial_choices, label="Label", value=initial_choices[0])
-                    custom_label = gr.Textbox(label="Or type a new label", placeholder="e.g. bent_pin")
+                    initial_tree = discover_taxonomy()
+                    initial_categories = category_choices(initial_tree)
+                    category_radio = gr.Radio(choices=initial_categories, label="Category", value=initial_categories[0])
+                    initial_category = label_from_choice(initial_categories[0])
+                    initial_subtypes = subtype_choices(initial_tree, initial_category)
+                    subtype_radio = gr.Radio(
+                        choices=initial_subtypes,
+                        label="Subtype (defect type, etc.)",
+                        value=initial_subtypes[0] if initial_subtypes else None,
+                    )
+                    custom_subtype = gr.Textbox(label="Or type a new subtype", placeholder="e.g. bent_pin")
                     capture_btn = gr.Button("Capture", variant="primary", size="lg")
                     undo_btn = gr.Button("Undo Last", variant="secondary", size="lg")
                     status = gr.Textbox(label="Status", interactive=False)
+                    gr.Markdown("Click a thumbnail below to select it, then delete it.")
+                    selected_image_display = gr.Textbox(label="Selected Image", interactive=False)
+                    delete_btn = gr.Button("Delete Selected", elem_id="delete-btn", size="lg")
+
+            selected_image_path = gr.State(None)
 
             gallery = gr.Gallery(
-                label="Recent Captures for This Label",
+                label="Recent Captures for This Category/Subtype",
                 columns=6,
                 rows=1,
                 object_fit="contain",
@@ -425,29 +657,51 @@ with gr.Blocks(title="ArgusVision", theme=THEME, css=CSS) as demo:
                         minimum=0.0, maximum=1.0, value=0.5, step=0.01,
                         label="Anomaly Threshold"
                     )
+                    suggest_threshold_btn = gr.Button(
+                        "Suggest Threshold from Captured Images", variant="secondary"
+                    )
+                    threshold_suggestion_status = gr.Textbox(label="Suggestion Result", interactive=False)
+                    lock_threshold_checkbox = gr.Checkbox(label="Lock Threshold", value=False)
                     score_display = gr.Number(label="Anomaly Score (max, 0-1)", interactive=False)
                     verdict_display = gr.HTML()
 
         with gr.Tab("Camera Settings"):
-            with gr.Group():
-                gr.Markdown("### Exposure — Manual / Auto")
-                exposure_auto = gr.Checkbox(label="Auto Exposure", value=True)
-                exposure_slider = gr.Slider(
-                    minimum=10, maximum=100000, value=10000,
-                    label="Exposure Time (microseconds)", interactive=False
-                )
+            gr.Markdown(
+                "Let **Auto** settle on a good image using the preview below "
+                "(aim for sharpness above ~50 and brightness in the 100-180 range), "
+                "then check **Lock Camera Settings** to freeze exactly what's currently "
+                "active so it can't drift or get bumped during production."
+            )
+            with gr.Row():
+                with gr.Column(scale=2):
+                    camera_settings_preview = gr.Image(label="Live Preview", height=360)
+                    with gr.Row():
+                        cs_sharpness_display = gr.Number(label="Sharpness (higher = sharper)", interactive=False)
+                        cs_brightness_display = gr.Number(label="Brightness (target 100-180)", interactive=False)
 
-            with gr.Group():
-                gr.Markdown("### Gain — Manual / Auto")
-                gain_auto = gr.Checkbox(label="Auto Gain", value=True)
-                gain_slider = gr.Slider(
-                    minimum=0, maximum=48, value=0,
-                    label="Gain (dB)", interactive=False
-                )
+                with gr.Column(scale=1):
+                    with gr.Group():
+                        gr.Markdown("### Exposure — Manual / Auto")
+                        exposure_auto = gr.Checkbox(label="Auto Exposure", value=True)
+                        exposure_slider = gr.Slider(
+                            minimum=10, maximum=100000, value=10000,
+                            label="Exposure Time (microseconds)", interactive=False
+                        )
 
-            with gr.Group():
-                gr.Markdown("### White Balance — Manual / Auto")
-                wb_auto = gr.Checkbox(label="Auto White Balance", value=True)
+                    with gr.Group():
+                        gr.Markdown("### Gain — Manual / Auto")
+                        gain_auto = gr.Checkbox(label="Auto Gain", value=True)
+                        gain_slider = gr.Slider(
+                            minimum=0, maximum=48, value=0,
+                            label="Gain (dB)", interactive=False
+                        )
+
+                    with gr.Group():
+                        gr.Markdown("### White Balance — Manual / Auto")
+                        wb_auto = gr.Checkbox(label="Auto White Balance", value=True)
+
+                    lock_camera_checkbox = gr.Checkbox(label="Lock Camera Settings", value=False)
+                    lock_camera_status = gr.Textbox(label="Lock Status", interactive=False)
 
     exposure_auto.change(toggle_exposure_auto, inputs=exposure_auto, outputs=exposure_slider)
     exposure_slider.release(update_exposure, inputs=exposure_slider)
@@ -457,19 +711,62 @@ with gr.Blocks(title="ArgusVision", theme=THEME, css=CSS) as demo:
 
     wb_auto.change(toggle_wb_auto, inputs=wb_auto)
 
-    label_radio.change(refresh_gallery, inputs=label_radio, outputs=gallery)
+    lock_camera_checkbox.change(
+        lock_camera_settings,
+        inputs=[lock_camera_checkbox, exposure_auto, gain_auto],
+        outputs=[lock_camera_checkbox, exposure_auto, exposure_slider, gain_auto, gain_slider, wb_auto, lock_camera_status],
+    )
+
+    suggest_threshold_btn.click(
+        suggest_threshold,
+        outputs=[threshold_slider, threshold_suggestion_status],
+    )
+    lock_threshold_checkbox.change(
+        lock_threshold,
+        inputs=lock_threshold_checkbox,
+        outputs=[threshold_slider, suggest_threshold_btn],
+    )
+
+    category_radio.change(
+        on_category_change,
+        inputs=category_radio,
+        outputs=[subtype_radio, gallery, selected_image_path, selected_image_display],
+    )
+    subtype_radio.change(
+        on_subtype_change,
+        inputs=[category_radio, subtype_radio],
+        outputs=[gallery, selected_image_path, selected_image_display],
+    )
 
     capture_btn.click(
         capture_and_save,
-        inputs=[label_radio, custom_label],
-        outputs=[status, label_radio, gallery, custom_label],
+        inputs=[category_radio, subtype_radio, custom_subtype],
+        outputs=[status, category_radio, subtype_radio, gallery, custom_subtype],
     )
-    undo_btn.click(undo_last_capture, inputs=label_radio, outputs=[status, label_radio, gallery])
+    undo_btn.click(
+        undo_last_capture,
+        inputs=[category_radio, subtype_radio],
+        outputs=[status, category_radio, subtype_radio, gallery],
+    )
+
+    gallery.select(
+        on_gallery_select,
+        inputs=[category_radio, subtype_radio],
+        outputs=[selected_image_path, selected_image_display],
+    )
+    delete_btn.click(
+        delete_selected_image,
+        inputs=[selected_image_path, category_radio, subtype_radio],
+        outputs=[status, category_radio, subtype_radio, gallery, selected_image_path, selected_image_display],
+    )
 
     inference_toggle.change(toggle_inference, inputs=inference_toggle, outputs=[inference_status, inference_toggle])
     threshold_slider.change(update_threshold, inputs=threshold_slider)
 
-    demo.load(stream_frames, outputs=[live_feed, sharpness_display, status_display])
+    demo.load(
+        stream_frames,
+        outputs=[live_feed, camera_settings_preview, sharpness_display, cs_sharpness_display, cs_brightness_display, status_display],
+    )
     demo.load(stream_inference, outputs=[inference_overlay, score_display, verdict_display])
 
 
