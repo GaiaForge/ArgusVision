@@ -42,6 +42,7 @@ CUDA_PACKAGES=(
     nvidia-nvtx-cu12
     nvidia-nccl-cu12
     nvidia-cuda-cupti-cu12
+    nvidia-cudss-cu12
 )
 for pkg in "${CUDA_PACKAGES[@]}"; do
     echo "--- $pkg ---"
