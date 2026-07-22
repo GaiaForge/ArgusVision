@@ -18,6 +18,7 @@ PACKAGES=(
     nvidia-cusparse-cu12
     nvidia-nvtx-cu12
     nvidia-nccl-cu12
+    nvidia-cuda-cupti-cu12
 )
 
 for pkg in "${PACKAGES[@]}"; do
@@ -25,21 +26,22 @@ for pkg in "${PACKAGES[@]}"; do
     pip install "$pkg" || echo "WARNING: $pkg failed to install (may not have an ARM64 wheel) - continuing"
 done
 
-SITE_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0])")
+echo ""
+echo "=== Installing libopenblas (system package, CPU-side linear algebra PyTorch also needs) ==="
+sudo apt install -y libopenblas0 || echo "WARNING: libopenblas0 not found - run 'apt-cache search openblas' to find the right package name for this Ubuntu version"
+
 ACTIVATE_DIR="$CONDA_PREFIX/etc/conda/activate.d"
 mkdir -p "$ACTIVATE_DIR"
 
+# Uses $CONDA_PREFIX directly (guaranteed set by conda during activation)
+# rather than shelling out to `python -c "import site; ..."`, which was found
+# to fail silently when run from inside an activate.d hook (timing/PATH issue
+# specific to that execution context, even though it works fine interactively).
 cat > "$ACTIVATE_DIR/env_vars.sh" << 'EOF'
-# Dynamically find every nvidia/*/lib and nvpl/lib folder in this environment's
-# site-packages, rather than hardcoding specific library paths that change
-# every time a new CUDA library gets added to fix a missing-.so error.
-_SITE_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0])" 2>/dev/null)
-if [ -n "$_SITE_PACKAGES" ]; then
-    _NVIDIA_LIBS=$(find "$_SITE_PACKAGES/nvidia" -maxdepth 2 -type d -name "lib" 2>/dev/null | tr '\n' ':')
-    _NVPL_LIBS=$(find "$_SITE_PACKAGES/nvpl" -maxdepth 2 -type d -name "lib" 2>/dev/null | tr '\n' ':')
-    export LD_LIBRARY_PATH="${_NVIDIA_LIBS}${_NVPL_LIBS}${LD_LIBRARY_PATH}"
-fi
-unset _SITE_PACKAGES _NVIDIA_LIBS _NVPL_LIBS
+_NVIDIA_LIBS=$(find "$CONDA_PREFIX"/lib/python3.*/site-packages/nvidia -maxdepth 2 -type d -name "lib" 2>/dev/null | tr '\n' ':')
+_NVPL_LIBS=$(find "$CONDA_PREFIX"/lib/python3.*/site-packages/nvpl -maxdepth 2 -type d -name "lib" 2>/dev/null | tr '\n' ':')
+export LD_LIBRARY_PATH="${_NVIDIA_LIBS}${_NVPL_LIBS}${LD_LIBRARY_PATH}"
+unset _NVIDIA_LIBS _NVPL_LIBS
 EOF
 
 echo ""
