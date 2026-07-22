@@ -23,8 +23,8 @@ echo "Activating conda environment 'LiZAD' ..."
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate LiZAD
 
-echo "Installing UI/server dependencies (gradio, fastapi, uvicorn, requests) ..."
-pip install gradio fastapi uvicorn requests
+echo "Installing UI/server dependencies (gradio, fastapi, uvicorn, requests, opencv-python, numpy) ..."
+pip install gradio fastapi uvicorn requests opencv-python numpy
 
 if [ -n "$ARENA_WHEEL" ]; then
     echo "Installing Arena SDK wheel: $ARENA_WHEEL"
