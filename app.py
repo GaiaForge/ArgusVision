@@ -365,6 +365,12 @@ CSS = """
 }
 
 button.lg { border-radius: 10px !important; font-weight: 600 !important; }
+
+#capture-gallery .grid-wrap { justify-content: flex-start !important; }
+#capture-gallery .thumbnail-item, #capture-gallery button {
+    max-width: 100px !important;
+    flex-grow: 0 !important;
+}
 """
 
 with gr.Blocks(title="ArgusVision", theme=THEME, css=CSS) as demo:
@@ -389,7 +395,15 @@ with gr.Blocks(title="ArgusVision", theme=THEME, css=CSS) as demo:
                     undo_btn = gr.Button("Undo Last", variant="secondary", size="lg")
                     status = gr.Textbox(label="Status", interactive=False)
 
-            gallery = gr.Gallery(label="Recent Captures for This Label", columns=8, height=150)
+            gallery = gr.Gallery(
+                label="Recent Captures for This Label",
+                columns=8,
+                rows=1,
+                height=110,
+                object_fit="cover",
+                preview=False,
+                elem_id="capture-gallery",
+            )
 
         with gr.Tab("Inspection"):
             inference_toggle = gr.Checkbox(label="Enable Live Inference (LiZAD, trained_on_visa)", value=False)
