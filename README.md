@@ -41,13 +41,24 @@ Styled to Tesla's internal UI Design Standards (confluence.teslamotors.com/space
 
 Both the camera SDK (`arena_api`) and LiZAD's stack (torch/transformers/open_clip_torch) need to be in the **same** conda environment for `lizad_server.py` to work (camera access happens in `app.py`, but both processes need to run from inside the `LiZAD` project's `conda activate LiZAD` environment for imports to resolve).
 
+**Automated:** clone this repo on the Jetson, then run the setup script from inside it:
+
 ```bash
+git clone https://github.com/GaiaForge/ArgusVision.git
+cd ArgusVision
+bash setup.sh
+```
+
+This copies `app.py`, `lizad_engine.py`, `lizad_server.py`, and `lizad_client.py` into `~/LiZAD/` (they need to live there specifically — `lizad_engine.py` imports `backbones` and `model` as local packages relative to that directory), activates the `LiZAD` conda environment, and installs `gradio`, `fastapi`, `uvicorn`, `requests`, and the Arena SDK Python wheel (auto-detected from `~/Downloads/ARENA_API-*.whl`).
+
+**Manual equivalent**, if you'd rather do it by hand or the script hits something environment-specific:
+
+```bash
+cp app.py lizad_engine.py lizad_server.py lizad_client.py ~/LiZAD/
 conda activate LiZAD
 pip install gradio fastapi uvicorn requests
 pip install <path-to-arena-api-wheel>.whl   # if not already installed in this env
 ```
-
-Copy `app.py`, `lizad_engine.py`, `lizad_server.py`, and `lizad_client.py` into `~/LiZAD/` directly — `lizad_engine.py` imports `backbones` and `model` as local packages relative to that directory, so these files need to live there, not in a separate folder.
 
 ## Running
 
