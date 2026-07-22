@@ -366,10 +366,18 @@ CSS = """
 
 button.lg { border-radius: 10px !important; font-weight: 600 !important; }
 
-#capture-gallery .grid-wrap { justify-content: flex-start !important; }
-#capture-gallery .thumbnail-item, #capture-gallery button {
-    max-width: 100px !important;
-    flex-grow: 0 !important;
+/* Make the capture gallery expand to fill remaining vertical space at the
+   bottom of the tab, rather than a fixed small height. Flexbox-based - may
+   need live adjustment depending on Gradio's exact DOM structure. */
+.gradio-container { display: flex; flex-direction: column; min-height: 100vh; }
+gradio-app, .tabs, .tabitem { display: flex; flex-direction: column; flex: 1; }
+#capture-gallery {
+    flex: 1 1 auto;
+    min-height: 220px;
+}
+#capture-gallery .grid-wrap {
+    height: 100% !important;
+    justify-content: flex-start !important;
 }
 """
 
@@ -397,10 +405,9 @@ with gr.Blocks(title="ArgusVision", theme=THEME, css=CSS) as demo:
 
             gallery = gr.Gallery(
                 label="Recent Captures for This Label",
-                columns=8,
+                columns=6,
                 rows=1,
-                height=110,
-                object_fit="cover",
+                object_fit="contain",
                 preview=False,
                 elem_id="capture-gallery",
             )
