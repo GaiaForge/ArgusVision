@@ -136,14 +136,14 @@ inference_state = {
 
 def toggle_inference(enabled):
     if enabled and not LIZAD_AVAILABLE:
-        return "LiZAD engine not available on this machine", gr.update(value=False)
+        return "LiZAD client not available on this machine", gr.update(value=False)
     inference_state["enabled"] = enabled
     if enabled and inference_state["engine"] is None:
-        try:
-            inference_state["engine"] = LiZADEngine(CHECKPOINT_PATH, class_name="pcb")
-        except Exception as e:
+        client = LiZADClient(host="localhost", port=8000)
+        if not client.health():
             inference_state["enabled"] = False
-            return f"Failed to load LiZAD engine: {e}", gr.update(value=False)
+            return "Cannot reach LiZAD inference server on localhost:8000 - is lizad_server.py running?", gr.update(value=False)
+        inference_state["engine"] = client
     return ("Live inference enabled" if enabled else "Live inference disabled"), gr.update()
 
 
