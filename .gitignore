@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+inspection_data/
+channel_config.json
+
+# Local-only publishing helper. Kept untracked on purpose - see the comments
+# inside it. Lives only on the dev machine; not part of the application.
+sync_public.sh
+*.jpg
+*.jpeg
+*.png
+.venv/
+venv/
+comparison_history.json
+setup_profile.json
+reports/
